@@ -1,0 +1,107 @@
+---
+title: "EDS 213 A.2 — Cover columns & Total_cover"
+author: "Lucian Scher"
+format: html
+---
+
+```{r}
+#| message: false
+library(tidyverse)
+
+# Paths
+in_path  <- "data/processed/snow_cover.csv"
+out_path <- "data/processed/all_cover_fixed_lucianscher.csv"
+```
+
+## What this does
+
+We start from `snow_cover.csv` (snow column already cleaned in class). We clean `Water_cover` and `Land_cover` the same way as `Snow_cover`, then use **Snow + Water + Land = 100%** where possible to fill **exactly one** missing percentage per row. Finally we set `Total_cover` to the sum of the three columns.
+
+## Metadata
+
+From `data/raw/01_ASDN_Readme.txt`: `Snow_cover`, `Water_cover`, and `Land_cover` are percent cover; `Total_cover` is the check total and should sum to 100. There is no coded meaning for `.` etc., so we mirror the class rules for `Snow_cover`.
+
+## Assumptions
+
+- Same sentinel strings as class: `.`, `-`, `n/a`, `unk` → missing; `<1` → 0 (treat as “trace”, not missing).
+- Percentages must be in \[0, 100\]; values `> 100` are set to `NA`.
+- **Single missing column:** if two covers are known and their sum ≤ 100, impute the third as `100 − known₁ − known₂` only if that value is in \[0, 100\]. If the two knowns already sum to more than 100, we do not impute.
+- **Two or three missing:** we do not guess.
+- **`Total_cover`:** always recomputed as `Snow_cover + Water_cover + Land_cover` after cleaning/imputation so it matches the three columns for database load.
+
+```{r}
+# Read processed snow survey (Snow_cover already cleaned)
+raw <- read_csv(in_path, show_col_types = FALSE)
+
+# Normalize one percentage column from messy text to numeric [0,100] with NA
+clean_pct_col <- function(x) {
+  x <- as.character(x)
+  x <- ifelse(x %in% c(".", "-", "n/a", "unk"), NA_character_, x)
+  x <- ifelse(x == "<1", "0", x)
+  out <- suppressWarnings(as.numeric(x))
+  out <- ifelse(!is.na(out) & out > 100, NA_real_, out)
+  out <- ifelse(!is.na(out) & out < 0, NA_real_, out)
+  out
+}
+
+# Re-apply same rules to Snow for consistency if anything slipped; clean Water & Land
+d <- raw %>%
+  mutate(
+    Snow_cover  = clean_pct_col(Snow_cover),
+    Water_cover = clean_pct_col(Water_cover),
+    Land_cover  = clean_pct_col(Land_cover)
+  )
+
+# Impute when exactly one of the three is NA and the pair sums to <= 100
+d <- d %>%
+  mutate(
+    s = Snow_cover, w = Water_cover, l = Land_cover,
+    miss_n = is.na(s) + is.na(w) + is.na(l)
+  ) %>%
+  mutate(
+    # infer snow
+    s_new = case_when(
+      miss_n == 1 & is.na(s) & !is.na(w) & !is.na(l) & (w + l <= 100) ~ 100 - w - l,
+      TRUE ~ s
+    ),
+    # infer water
+    w_new = case_when(
+      miss_n == 1 & is.na(w) & !is.na(s_new) & !is.na(l) & (s_new + l <= 100) ~ 100 - s_new - l,
+      TRUE ~ w
+    ),
+    # infer land (use updated snow & water)
+    l_new = case_when(
+      miss_n == 1 & is.na(l) & !is.na(s_new) & !is.na(w_new) & (s_new + w_new <= 100) ~ 100 - s_new - w_new,
+      TRUE ~ l
+    )
+  ) %>%
+  mutate(
+    # If imputed value is not a percentage (outside [0,100]) → revert to NA for that cover
+    s_new = ifelse(!is.na(s_new) & (s_new < 0 | s_new > 100), s, s_new),
+    w_new = ifelse(!is.na(w_new) & (w_new < 0 | w_new > 100), w, w_new),
+    l_new = ifelse(!is.na(l_new) & (l_new < 0 | l_new > 100), l, l_new),
+    Snow_cover  = s_new,
+    Water_cover = w_new,
+    Land_cover  = l_new,
+    Total_cover = Snow_cover + Water_cover + Land_cover
+  ) %>%
+  select(-s, -w, -l, -miss_n, -s_new, -w_new, -l_new)
+
+dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
+write_csv(d, out_path)
+
+# Rows where all three known should often sum to ~100
+d %>%
+  filter(!is.na(Snow_cover), !is.na(Water_cover), !is.na(Land_cover)) %>%
+  mutate(sum3 = Snow_cover + Water_cover + Land_cover) %>%
+  summarise(
+    n = n(),
+    n_eq_100 = sum(abs(sum3 - 100) < 1e-6, na.rm = TRUE)
+  )
+
+```
+
+## Validation 
+
+After cleaning and single-column imputation, we checked rows where all three cover percentages were non-missing. Of 42,064 such rows, 37,491 (about 89%) had Snow, Water, and Land summing to 100% within numerical tolerance, while the remaining **4,573 rows still did not sum to 100%**. We did not treat that as a failure of the pipeline: the metadata describes the three covers as percentages that should sum to 100 for quality control, but our rule only uses that constraint to fill one missing value when the other two are known and consistent; when all three values were already recorded, we left them unchanged rather than forcing a proportional adjustment. Accordingly, `Total_cover` is always recomputed as the sum of the three columns and can differ from 100 whenever the underlying observations are internally inconsistent, which we report transparently rather than overwriting values without field documentation.
+
