@@ -25,8 +25,9 @@ From `data/raw/01_ASDN_Readme.txt`: `Snow_cover`, `Water_cover`, and `Land_cover
 
 - Same sentinel strings as class: `.`, `-`, `n/a`, `unk` → missing; `<1` → 0 (treat as “trace”, not missing).
 - Percentages must be in \[0, 100\]; values `> 100` are set to `NA`.
-- **Single missing column:** if two covers are known and their sum ≤ 100, impute the third as `100 − known₁ − known₂` only if that value is in \[0, 100\]. If the two knowns already sum to more than 100, we do not impute.
-- **Two or three missing:** we do not guess.
+- **Single missing column:** If exactly one of snow, water, or land is missing but the other two are valid percentages, then whenever those two add up to at most 100%, the missing value is **uniquely determined** by the rule that the three covers sum to 100% (subtract the two observed covers from 100). That is an **imputed** value, but it is not an arbitrary guess because only one number completes the total. If the two observed covers already add up to more than 100%, there is **no** non-negative third percentage that makes the story consistent, so we **leave the missing value as missing**.
+
+- **Two or three missing:** If two or all three cover values are missing, the “sum to 100%” constraint **does not uniquely determine** each cover (many combinations would work), so we **do not impute** and leave the missing values as missing.
 - **`Total_cover`:** always recomputed as `Snow_cover + Water_cover + Land_cover` after cleaning/imputation so it matches the three columns for database load.
 
 ```{r}
